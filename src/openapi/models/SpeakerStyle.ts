@@ -1,8 +1,8 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * VOICEVOX Engine
- * VOICEVOXの音声合成エンジンです。
+ * DUMMY Engine
+ * DUMMY の音声合成エンジンです。
  *
  * The version of the OpenAPI document: latest
  * 
@@ -14,24 +14,43 @@
 
 import { exists, mapValues } from '../runtime';
 /**
- * 話者のスタイル情報
+ * キャラクターのスタイル情報
  * @export
  * @interface SpeakerStyle
  */
 export interface SpeakerStyle {
     /**
-     * 
+     * スタイル名
      * @type {string}
      * @memberof SpeakerStyle
      */
     name: string;
     /**
-     * 
+     * スタイルID
      * @type {number}
      * @memberof SpeakerStyle
      */
     id: number;
+    /**
+     * スタイルの種類。talk:音声合成クエリの作成と音声合成が可能。singing_teacher:歌唱音声合成用のクエリの作成が可能。frame_decode:歌唱音声合成が可能。sing:歌唱音声合成用のクエリの作成と歌唱音声合成が可能。
+     * @type {string}
+     * @memberof SpeakerStyle
+     */
+    type?: SpeakerStyleTypeEnum;
 }
+
+
+/**
+ * @export
+ */
+export const SpeakerStyleTypeEnum = {
+    Talk: 'talk',
+    SingingTeacher: 'singing_teacher',
+    FrameDecode: 'frame_decode',
+    Sing: 'sing'
+} as const;
+export type SpeakerStyleTypeEnum = typeof SpeakerStyleTypeEnum[keyof typeof SpeakerStyleTypeEnum];
+
 
 /**
  * Check if a given object implements the SpeakerStyle interface.
@@ -56,6 +75,7 @@ export function SpeakerStyleFromJSONTyped(json: any, ignoreDiscriminator: boolea
         
         'name': json['name'],
         'id': json['id'],
+        'type': !exists(json, 'type') ? undefined : json['type'],
     };
 }
 
@@ -70,6 +90,7 @@ export function SpeakerStyleToJSON(value?: SpeakerStyle | null): any {
         
         'name': value.name,
         'id': value.id,
+        'type': value.type,
     };
 }
 

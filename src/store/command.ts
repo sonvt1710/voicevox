@@ -1,27 +1,20 @@
 import { toRaw } from "vue";
 import { enablePatches, enableMapSet, Immer } from "immer";
-// immerの内部関数であるgetPlugin("Patches").applyPatches_はexportされていないので
-// ビルド前のsrcからソースコードを読み込んで使う必要がある
-import { enablePatches as enablePatchesImpl } from "immer/src/plugins/patches";
-import { enableMapSet as enableMapSetImpl } from "immer/src/plugins/mapset";
-import { getPlugin } from "immer/src/utils/plugins";
 
 import { Command, CommandStoreState, CommandStoreTypes, State } from "./type";
+import { applyPatches } from "@/store/immerPatchUtility";
 import {
   createPartialStore,
   Mutation,
   MutationsBase,
   MutationTree,
 } from "@/store/vuex";
+import { CommandId, EditorType } from "@/type/preload";
+import { uuid4 } from "@/helpers/random";
+import { objectEntries, objectFromEntries } from "@/helpers/typedEntries";
 
-// ビルド後のモジュールとビルド前のモジュールは別のスコープで変数を持っているので
-// enable * も両方叩く必要がある。
 enablePatches();
 enableMapSet();
-enablePatchesImpl();
-enableMapSetImpl();
-// immerのPatchをmutableに適応する内部関数
-const applyPatchesImpl = getPlugin("Patches").applyPatches_;
 
 const immer = new Immer();
 immer.setAutoFreeze(false);
@@ -37,13 +30,15 @@ export type PayloadRecipeTree<S, M> = {
  * @returns Mutationを持つオブジェクト(MutationTree)
  */
 export const createCommandMutationTree = <S, M extends MutationsBase>(
-  payloadRecipeTree: PayloadRecipeTree<S, M>
+  payloadRecipeTree: PayloadRecipeTree<S, M>,
+  editor: EditorType,
 ): MutationTree<S, M> =>
-  Object.fromEntries(
-    Object.entries(payloadRecipeTree).map(([key, val]) => [
+  objectFromEntries(
+    objectEntries(payloadRecipeTree).map(([key, val]) => [
       key,
-      createCommandMutation(val),
-    ])
+      // @ts-expect-error とりあえず動くので無視
+      createCommandMutation(val, editor),
+    ]),
   ) as MutationTree<S, M>;
 
 /**
@@ -53,13 +48,14 @@ export const createCommandMutationTree = <S, M extends MutationsBase>(
  */
 export const createCommandMutation =
   <S extends State, M extends MutationsBase, K extends keyof M>(
-    payloadRecipe: PayloadRecipe<S, M[K]>
+    payloadRecipe: PayloadRecipe<S, M[K]>,
+    editor: EditorType,
   ): Mutation<S, M, K> =>
   (state: S, payload: M[K]): void => {
     const command = recordPatches(payloadRecipe)(state, payload);
-    applyPatchesImpl(state, command.redoPatches);
-    state.undoCommands.push(command);
-    state.redoCommands.splice(0);
+    applyPatches(state, command.redoPatches);
+    state.undoCommands[editor].push(command);
+    state.redoCommands[editor].splice(0);
   };
 
 /**
@@ -70,74 +66,98 @@ const recordPatches =
   <S, P>(recipe: PayloadRecipe<S, P>) =>
   (state: S, payload: P): Command => {
     const [, doPatches, undoPatches] = immer.produceWithPatches(
-      toRaw(state) as S,
-      (draft: S) => recipe(draft, payload)
+      toRaw(state),
+      (draft: S) => recipe(draft, payload),
     );
     return {
-      unixMillisec: new Date().getTime(),
+      id: CommandId(uuid4()),
       redoPatches: doPatches,
       undoPatches: undoPatches,
     };
   };
 
 export const commandStoreState: CommandStoreState = {
-  undoCommands: [],
-  redoCommands: [],
+  undoCommands: {
+    talk: [],
+    song: [],
+  },
+  redoCommands: {
+    talk: [],
+    song: [],
+  },
 };
 
 export const commandStore = createPartialStore<CommandStoreTypes>({
   CAN_UNDO: {
-    getter(state) {
-      return state.undoCommands.length > 0;
+    getter: (state) => (editor: EditorType) => {
+      return state.undoCommands[editor].length > 0;
     },
   },
 
   CAN_REDO: {
-    getter(state) {
-      return state.redoCommands.length > 0;
+    getter: (state) => (editor: EditorType) => {
+      return state.redoCommands[editor].length > 0;
     },
   },
 
   UNDO: {
-    mutation(state) {
-      const command = state.undoCommands.pop();
+    mutation(state, { editor }) {
+      const command = state.undoCommands[editor].pop();
       if (command != null) {
-        state.redoCommands.push(command);
-        applyPatchesImpl(state, command.undoPatches);
+        state.redoCommands[editor].push(command);
+        applyPatches(state, command.undoPatches);
       }
     },
-    action({ commit }) {
-      commit("UNDO");
+    action({ mutations, actions }, { editor }: { editor: EditorType }) {
+      mutations.UNDO({ editor });
+      if (editor === "song") {
+        // TODO: 存在しないノートのみ選択解除、あるいはSELECTED_NOTE_IDS getterを作る
+        mutations.DESELECT_ALL_NOTES();
+        void actions.SYNC_TRACKS_AND_TRACK_CHANNEL_STRIPS();
+        void actions.RENDER();
+      }
     },
   },
 
   REDO: {
-    mutation(state) {
-      const command = state.redoCommands.pop();
+    mutation(state, { editor }) {
+      const command = state.redoCommands[editor].pop();
       if (command != null) {
-        state.undoCommands.push(command);
-        applyPatchesImpl(state, command.redoPatches);
+        state.undoCommands[editor].push(command);
+        applyPatches(state, command.redoPatches);
       }
     },
-    action({ commit }) {
-      commit("REDO");
+    action({ mutations, actions }, { editor }: { editor: EditorType }) {
+      mutations.REDO({ editor });
+      if (editor === "song") {
+        // TODO: 存在しないノートのみ選択解除、あるいはSELECTED_NOTE_IDS getterを作る
+        mutations.DESELECT_ALL_NOTES();
+        void actions.SYNC_TRACKS_AND_TRACK_CHANNEL_STRIPS();
+        void actions.RENDER();
+      }
     },
   },
 
-  LAST_COMMAND_UNIX_MILLISEC: {
+  LAST_COMMAND_IDS: {
     getter(state) {
-      if (state.undoCommands.length === 0) {
-        return null;
-      } else {
-        return state.undoCommands[state.undoCommands.length - 1].unixMillisec;
-      }
+      const getLastCommandId = (commands: Command[]): CommandId | null => {
+        if (commands.length == 0) return null;
+        else return commands[commands.length - 1].id;
+      };
+
+      return {
+        talk: getLastCommandId(state.undoCommands["talk"]),
+        song: getLastCommandId(state.undoCommands["song"]),
+      };
     },
   },
 
   CLEAR_COMMANDS: {
     mutation(state) {
-      state.redoCommands.splice(0);
-      state.undoCommands.splice(0);
+      for (const editor of ["talk", "song"] as const) {
+        state.undoCommands[editor].splice(0);
+        state.redoCommands[editor].splice(0);
+      }
     },
   },
 });
