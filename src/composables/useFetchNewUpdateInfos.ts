@@ -8,8 +8,8 @@ import { UpdateInfo, UrlString, updateInfoSchema } from "@/type/preload";
  * あれば最新バージョンと、現在より新しいバージョンの情報を返す。
  */
 export const useFetchNewUpdateInfos = (
-  currentVersionGetter: () => Promise<string>,
-  newUpdateInfosUrl: UrlString
+  currentVersionGetter: () => string | Promise<string>,
+  newUpdateInfosUrl: UrlString,
 ) => {
   const result = ref<
     | {
@@ -27,14 +27,14 @@ export const useFetchNewUpdateInfos = (
     status: "updateChecking",
   });
 
-  (async () => {
+  void (async () => {
     const currentVersion = await currentVersionGetter();
 
     const updateInfos = await fetch(newUpdateInfosUrl).then(
       async (response) => {
         if (!response.ok) throw new Error("Network response was not ok.");
         return z.array(updateInfoSchema).parse(await response.json());
-      }
+      },
     );
     const newUpdateInfos = updateInfos.filter((item: UpdateInfo) => {
       return semver.lt(currentVersion, item.version);

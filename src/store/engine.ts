@@ -1,6 +1,7 @@
 import { EngineState, EngineStoreState, EngineStoreTypes } from "./type";
 import { createUILockAction } from "./ui";
 import { createPartialStore } from "./vuex";
+import { createLogger } from "@/helpers/log";
 import type { EngineManifest } from "@/openapi";
 import type { EngineId, EngineInfo } from "@/type/preload";
 
@@ -9,23 +10,24 @@ export const engineStoreState: EngineStoreState = {
   engineSupportedDevices: {},
   altPortInfos: {},
 };
+const { info, error } = createLogger("store/engine");
 
 export const engineStore = createPartialStore<EngineStoreTypes>({
-  GET_ENGINE_INFOS: {
-    async action({ state, commit }) {
-      const engineInfos = await window.electron.engineInfos();
+  /**
+   * backendのエンジン情報をstateに同期して初期化する。
+   * エンジンIDも同期する。
+   */
+  PULL_AND_INIT_ENGINE_INFOS: {
+    async action({ state, mutations }) {
+      let engineInfos = await window.backend.engineInfos();
 
-      // マルチエンジンオフモード時はengineIdsをデフォルトエンジンのIDだけにする。
-      let engineIds: EngineId[];
+      // マルチエンジンオフモード時はデフォルトエンジンだけにする。
       if (state.isMultiEngineOffMode) {
-        engineIds = engineInfos
-          .filter((engineInfo) => engineInfo.type === "default")
-          .map((info) => info.uuid);
-      } else {
-        engineIds = engineInfos.map((engineInfo) => engineInfo.uuid);
+        engineInfos = engineInfos.filter((engineInfo) => engineInfo.isDefault);
       }
+      const engineIds = engineInfos.map((engineInfo) => engineInfo.uuid);
 
-      commit("SET_ENGINE_INFOS", {
+      mutations.SET_ENGINE_INFOS({
         engineIds,
         engineInfos,
       });
@@ -38,12 +40,13 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
     },
   },
 
-  GET_ONLY_ENGINE_INFOS: {
-    async action({ commit }, { engineIds }) {
-      const engineInfos = await window.electron.engineInfos();
+  /** backendのエンジン情報をstateに同期する。 */
+  PULL_ENGINE_INFOS: {
+    async action({ mutations }, { engineIds }) {
+      const engineInfos = await window.backend.engineInfos();
       for (const engineInfo of engineInfos) {
         if (engineIds.includes(engineInfo.uuid)) {
-          commit("SET_ENGINE_INFO", {
+          mutations.SET_ENGINE_INFO({
             engineId: engineInfo.uuid,
             engineInfo,
           });
@@ -55,8 +58,8 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   GET_SORTED_ENGINE_INFOS: {
     getter: (state) => {
       return Object.values(state.engineInfos).sort((a, b) => {
-        const isDefaultA = a.type === "default" ? 1 : 0;
-        const isDefaultB = b.type === "default" ? 1 : 0;
+        const isDefaultA = a.isDefault ? 1 : 0;
+        const isDefaultB = b.isDefault ? 1 : 0;
         if (isDefaultA !== isDefaultB) {
           return isDefaultB - isDefaultA;
         }
@@ -66,10 +69,10 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
     },
   },
 
-  GET_ALT_PORT_INFOS: {
-    async action({ commit }) {
-      const altPortInfos = await window.electron.getAltPortInfos();
-      commit("SET_ALT_PORT_INFOS", { altPortInfos });
+  PULL_ALT_PORT_INFOS: {
+    async action({ mutations }) {
+      const altPortInfos = await window.backend.getAltPortInfos();
+      mutations.SET_ALT_PORT_INFOS({ altPortInfos });
       return altPortInfos;
     },
   },
@@ -86,14 +89,14 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
       {
         engineIds,
         engineInfos,
-      }: { engineIds: EngineId[]; engineInfos: EngineInfo[] }
+      }: { engineIds: EngineId[]; engineInfos: EngineInfo[] },
     ) {
       state.engineIds = engineIds;
       state.engineInfos = Object.fromEntries(
-        engineInfos.map((engineInfo) => [engineInfo.uuid, engineInfo])
+        engineInfos.map((engineInfo) => [engineInfo.uuid, engineInfo]),
       );
       state.engineStates = Object.fromEntries(
-        engineInfos.map((engineInfo) => [engineInfo.uuid, "STARTING"])
+        engineInfos.map((engineInfo) => [engineInfo.uuid, "STARTING"]),
       );
     },
   },
@@ -101,27 +104,36 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   SET_ENGINE_MANIFESTS: {
     mutation(
       state,
-      { engineManifests }: { engineManifests: Record<EngineId, EngineManifest> }
+      {
+        engineManifests,
+      }: { engineManifests: Record<EngineId, EngineManifest> },
     ) {
       state.engineManifests = engineManifests;
     },
   },
 
   FETCH_AND_SET_ENGINE_MANIFESTS: {
-    async action({ state, commit }) {
-      commit("SET_ENGINE_MANIFESTS", {
-        engineManifests: Object.fromEntries(
+    async action({ state, mutations, actions }) {
+      mutations.SET_ENGINE_MANIFESTS({
+        engineManifests: Object.fromEntries<EngineManifest>(
           await Promise.all(
             state.engineIds.map(
               async (engineId) =>
-                await this.dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
-                  engineId,
-                }).then(async (instance) => [
-                  engineId,
-                  await instance.invoke("engineManifestEngineManifestGet")({}),
-                ])
-            )
-          )
+                await actions
+                  .INSTANTIATE_ENGINE_CONNECTOR({
+                    engineId,
+                  })
+                  .then(
+                    async (instance) =>
+                      [
+                        engineId,
+                        await instance.invoke(
+                          "engineManifestEngineManifestGet",
+                        )({}),
+                      ] as const,
+                  ),
+            ),
+          ),
         ),
       });
     },
@@ -157,7 +169,7 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
 
   START_WAITING_ENGINE: {
     action: createUILockAction(
-      async ({ state, commit, dispatch }, { engineId }) => {
+      async ({ state, mutations, actions }, { engineId }) => {
         let engineState: EngineState | undefined = state.engineStates[engineId];
         if (engineState == undefined)
           throw new Error(`No such engineState set: engineId == ${engineId}`);
@@ -172,54 +184,53 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
           }
 
           try {
-            await dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
-              engineId,
-            }).then((instance) => instance.invoke("versionVersionGet")({}));
+            await actions
+              .INSTANTIATE_ENGINE_CONNECTOR({
+                engineId,
+              })
+              .then((instance) => instance.invoke("versionVersionGet")({}));
           } catch {
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            window.electron.logInfo(`Waiting engine ${engineId}`);
+            info(`Waiting engine ${engineId}`);
             continue;
           }
           engineState = "READY";
-          commit("SET_ENGINE_STATE", { engineId, engineState });
+          mutations.SET_ENGINE_STATE({ engineId, engineState });
           break;
         }
 
         if (engineState !== "READY") {
-          commit("SET_ENGINE_STATE", {
+          mutations.SET_ENGINE_STATE({
             engineId,
             engineState: "FAILED_STARTING",
           });
         }
-      }
+      },
     ),
   },
 
   RESTART_ENGINES: {
-    async action({ dispatch, commit }, { engineIds }) {
+    async action({ actions, mutations }, { engineIds }) {
       await Promise.all(
         engineIds.map(async (engineId) => {
-          commit("SET_ENGINE_STATE", { engineId, engineState: "STARTING" });
+          mutations.SET_ENGINE_STATE({ engineId, engineState: "STARTING" });
           try {
-            return window.electron.restartEngine(engineId);
+            return window.backend.restartEngine(engineId);
           } catch (e) {
-            dispatch("LOG_ERROR", {
-              error: e,
-              message: `Failed to restart engine: ${engineId}`,
-            });
-            await dispatch("DETECTED_ENGINE_ERROR", { engineId });
+            error(`Failed to restart engine: ${engineId}`);
+            await actions.DETECTED_ENGINE_ERROR({ engineId });
             return {
               success: false,
               anyNewCharacters: false,
             };
           }
-        })
+        }),
       );
 
-      await dispatch("GET_ONLY_ENGINE_INFOS", { engineIds });
+      await actions.PULL_ENGINE_INFOS({ engineIds });
 
-      const result = await dispatch("POST_ENGINE_START", {
+      const result = await actions.POST_ENGINE_START({
         engineIds,
       });
 
@@ -228,35 +239,35 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   },
 
   POST_ENGINE_START: {
-    async action({ state, dispatch }, { engineIds }) {
-      await dispatch("GET_ALT_PORT_INFOS");
+    async action({ state, actions }, { engineIds }) {
+      await actions.PULL_ALT_PORT_INFOS();
       const result = await Promise.all(
         engineIds.map(async (engineId) => {
           if (state.engineStates[engineId] === "STARTING") {
-            await dispatch("START_WAITING_ENGINE", { engineId });
-            await dispatch("FETCH_AND_SET_ENGINE_MANIFEST", { engineId });
-            await dispatch("FETCH_AND_SET_ENGINE_SUPPORTED_DEVICES", {
+            await actions.START_WAITING_ENGINE({ engineId });
+            await actions.FETCH_AND_SET_ENGINE_MANIFEST({ engineId });
+            await actions.FETCH_AND_SET_ENGINE_SUPPORTED_DEVICES({
               engineId,
             });
-            await dispatch("LOAD_CHARACTER", { engineId });
+            await actions.LOAD_CHARACTER({ engineId });
           }
 
-          await dispatch("LOAD_DEFAULT_STYLE_IDS");
-          await dispatch("CREATE_ALL_DEFAULT_PRESET");
-          const newCharacters = await dispatch("GET_NEW_CHARACTERS");
+          await actions.LOAD_DEFAULT_STYLE_IDS();
+          await actions.CREATE_ALL_DEFAULT_PRESET();
+          const newCharacters = await actions.GET_NEW_CHARACTERS();
           const result = {
             success: state.engineStates[engineId] === "READY",
             anyNewCharacters: newCharacters.length > 0,
           };
           return result;
-        })
+        }),
       );
       const mergedResult = {
         success: result.every((r) => r.success),
         anyNewCharacters: result.some((r) => r.anyNewCharacters),
       };
       if (mergedResult.anyNewCharacters) {
-        dispatch("SET_DIALOG_OPEN", {
+        void actions.SET_DIALOG_OPEN({
           isCharacterOrderDialogOpen: true,
         });
       }
@@ -266,30 +277,30 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   },
 
   DETECTED_ENGINE_ERROR: {
-    action({ state, commit }, { engineId }) {
+    action({ state, mutations }, { engineId }) {
       const engineState: EngineState | undefined = state.engineStates[engineId];
       if (engineState == undefined)
         throw new Error(`No such engineState set: engineId == ${engineId}`);
 
       switch (engineState) {
         case "STARTING":
-          commit("SET_ENGINE_STATE", {
+          mutations.SET_ENGINE_STATE({
             engineId,
             engineState: "FAILED_STARTING",
           });
           break;
         case "READY":
-          commit("SET_ENGINE_STATE", { engineId, engineState: "ERROR" });
+          mutations.SET_ENGINE_STATE({ engineId, engineState: "ERROR" });
           break;
         default:
-          commit("SET_ENGINE_STATE", { engineId, engineState: "ERROR" });
+          mutations.SET_ENGINE_STATE({ engineId, engineState: "ERROR" });
       }
     },
   },
 
   OPEN_ENGINE_DIRECTORY: {
     action(_, { engineId }) {
-      return window.electron.openEngineDirectory(engineId);
+      return window.backend.openEngineDirectory(engineId);
     },
   },
 
@@ -299,7 +310,7 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
       {
         engineId,
         engineState,
-      }: { engineId: EngineId; engineState: EngineState }
+      }: { engineId: EngineId; engineState: EngineState },
     ) {
       state.engineStates[engineId] = engineState;
     },
@@ -309,80 +320,96 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
     /**
      * 指定した話者（スタイルID）がエンジン側で初期化されているか
      */
-    async action({ dispatch }, { engineId, styleId }) {
-      const isInitialized = await dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
-        engineId,
-      }).then((instance) =>
-        instance.invoke("isInitializedSpeakerIsInitializedSpeakerGet")({
-          speaker: styleId,
+    async action({ actions }, { engineId, styleId }) {
+      const isInitialized = await actions
+        .INSTANTIATE_ENGINE_CONNECTOR({
+          engineId,
         })
-      );
+        .then((instance) =>
+          instance.invoke("isInitializedSpeakerIsInitializedSpeakerGet")({
+            speaker: styleId,
+          }),
+        );
 
       return isInitialized;
     },
   },
 
-  INITIALIZE_ENGINE_SPEAKER: {
+  INITIALIZE_ENGINE_CHARACTER: {
     /**
-     * 指定した話者（スタイルID）に対してエンジン側の初期化を行い、即座に音声合成ができるようにする。
+     * 指定したキャラクター（スタイルID）に対してエンジン側の初期化を行い、即座に音声合成ができるようにする。
      */
-    async action({ dispatch }, { engineId, styleId }) {
-      await dispatch("ASYNC_UI_LOCK", {
-        callback: () =>
-          dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
+    async action({ actions }, { engineId, styleId, uiLock }) {
+      const requestEngineToInitializeCharacter = () =>
+        actions
+          .INSTANTIATE_ENGINE_CONNECTOR({
             engineId,
-          }).then((instance) =>
+          })
+          .then((instance) =>
             instance.invoke("initializeSpeakerInitializeSpeakerPost")({
               speaker: styleId,
-            })
-          ),
-      });
+            }),
+          );
+
+      if (uiLock) {
+        await actions.ASYNC_UI_LOCK({
+          callback: requestEngineToInitializeCharacter,
+        });
+      } else {
+        await requestEngineToInitializeCharacter();
+      }
     },
   },
+
   VALIDATE_ENGINE_DIR: {
     action: async (_, { engineDir }) => {
-      return window.electron.validateEngineDir(engineDir);
+      return window.backend.validateEngineDir(engineDir);
     },
   },
+
   ADD_ENGINE_DIR: {
     action: async (_, { engineDir }) => {
-      const registeredEngineDirs = await window.electron.getSetting(
-        "registeredEngineDirs"
+      const registeredEngineDirs = await window.backend.getSetting(
+        "registeredEngineDirs",
       );
-      await window.electron.setSetting("registeredEngineDirs", [
+      await window.backend.setSetting("registeredEngineDirs", [
         ...registeredEngineDirs,
         engineDir,
       ]);
     },
   },
+
   REMOVE_ENGINE_DIR: {
     action: async (_, { engineDir }) => {
-      const registeredEngineDirs = await window.electron.getSetting(
-        "registeredEngineDirs"
-      );
-      await window.electron.setSetting(
+      const registeredEngineDirs = await window.backend.getSetting(
         "registeredEngineDirs",
-        registeredEngineDirs.filter((path) => path !== engineDir)
+      );
+      await window.backend.setSetting(
+        "registeredEngineDirs",
+        registeredEngineDirs.filter((path) => path !== engineDir),
       );
     },
   },
+
   INSTALL_VVPP_ENGINE: {
     action: async (_, path) => {
-      return window.electron.installVvppEngine(path);
+      return window.backend.installVvppEngine(path);
     },
   },
+
   UNINSTALL_VVPP_ENGINE: {
     action: async (_, engineId) => {
-      return window.electron.uninstallVvppEngine(engineId);
+      return window.backend.uninstallVvppEngine(engineId);
     },
   },
+
   SET_ENGINE_MANIFEST: {
     mutation(
       state,
       {
         engineId,
         engineManifest,
-      }: { engineId: EngineId; engineManifest: EngineManifest }
+      }: { engineId: EngineId; engineManifest: EngineManifest },
     ) {
       state.engineManifests = {
         ...state.engineManifests,
@@ -392,14 +419,16 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   },
 
   FETCH_AND_SET_ENGINE_MANIFEST: {
-    async action({ commit }, { engineId }) {
-      commit("SET_ENGINE_MANIFEST", {
+    async action({ mutations }, { engineId }) {
+      mutations.SET_ENGINE_MANIFEST({
         engineId,
-        engineManifest: await this.dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
-          engineId,
-        }).then((instance) =>
-          instance.invoke("engineManifestEngineManifestGet")({})
-        ),
+        engineManifest: await this.actions
+          .INSTANTIATE_ENGINE_CONNECTOR({
+            engineId,
+          })
+          .then((instance) =>
+            instance.invoke("engineManifestEngineManifestGet")({}),
+          ),
       });
     },
   },
@@ -414,15 +443,17 @@ export const engineStore = createPartialStore<EngineStoreTypes>({
   },
 
   FETCH_AND_SET_ENGINE_SUPPORTED_DEVICES: {
-    async action({ dispatch, commit }, { engineId }) {
-      const supportedDevices = await dispatch("INSTANTIATE_ENGINE_CONNECTOR", {
-        engineId,
-      }).then(
-        async (instance) =>
-          await instance.invoke("supportedDevicesSupportedDevicesGet")({})
-      );
+    async action({ actions, mutations }, { engineId }) {
+      const supportedDevices = await actions
+        .INSTANTIATE_ENGINE_CONNECTOR({
+          engineId,
+        })
+        .then(
+          async (instance) =>
+            await instance.invoke("supportedDevicesSupportedDevicesGet")({}),
+        );
 
-      commit("SET_ENGINE_SUPPORTED_DEVICES", {
+      mutations.SET_ENGINE_SUPPORTED_DEVICES({
         engineId,
         supportedDevices: supportedDevices,
       });
