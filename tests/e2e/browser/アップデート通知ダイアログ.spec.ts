@@ -13,7 +13,7 @@ test.beforeEach(async ({ page }) => {
   // 動作環境より新しいバージョン
   const latestVersion = semver.inc(
     process.env.VITE_APP_VERSION ?? process.env.npm_package_version ?? "0.0.0",
-    "major"
+    "major",
   );
   assertNonNullable(latestVersion);
 
@@ -21,7 +21,7 @@ test.beforeEach(async ({ page }) => {
   if (process.env.VITE_LATEST_UPDATE_INFOS_URL == undefined) {
     throw new Error("VITE_LATEST_UPDATE_INFOS_URL is not defined");
   }
-  page.route(process.env.VITE_LATEST_UPDATE_INFOS_URL, (route) => {
+  await page.route(process.env.VITE_LATEST_UPDATE_INFOS_URL, async (route) => {
     const updateInfos: UpdateInfo[] = [
       {
         version: latestVersion,
@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
         contributors: [],
       },
     ];
-    route.fulfill({
+    await route.fulfill({
       status: 200,
       body: JSON.stringify(updateInfos),
     });
@@ -57,7 +57,9 @@ test("アップデートが通知されたりスキップしたりできる", as
 
   // 再度開くとまた表示される
   await page.reload();
-  await expect(dialog.getByText("アップデートのお知らせ")).toBeVisible();
+  await expect(dialog.getByText("アップデートのお知らせ")).toBeVisible({
+    timeout: 10000, // 表示に時間がかかる
+  });
 
   // スキップすると消える
   await dialog

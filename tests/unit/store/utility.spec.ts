@@ -1,5 +1,11 @@
 import { AccentPhrase, Mora } from "@/openapi";
-import { ToolbarButtonTagType, isMac } from "@/type/preload";
+import {
+  CharacterInfo,
+  EngineId,
+  SpeakerId,
+  StyleId,
+  ToolbarButtonTagType,
+} from "@/type/preload";
 import {
   formatCharacterStyleName,
   sanitizeFileName,
@@ -11,12 +17,11 @@ import {
   isAccentPhrasesTextDifferent,
   buildAudioFileNameFromRawData,
   getToolbarButtonName,
-  createKanaRegex,
-  convertHiraToKana,
-  convertLongVowel,
-  getBaseName,
   isOnCommandOrCtrlKeyDown,
+  filterCharacterInfosByStyleType,
 } from "@/store/utility";
+import { uuid4 } from "@/helpers/random";
+import { isMac } from "@/helpers/platform";
 
 function createDummyMora(text: string): Mora {
   return {
@@ -37,7 +42,7 @@ function createDummyAccentPhrase(moraTexts: string[]): AccentPhrase {
 // AccentPhrasesから特定のmora textを持つものMoraを返す
 function findMora(
   accentPhrases: AccentPhrase[],
-  text: string
+  text: string,
 ): Mora | undefined {
   let candidate: Mora | undefined;
   for (let i = 0; i < accentPhrases.length; i++) {
@@ -55,16 +60,16 @@ function findMora(
 
 test("formatCharacterStyleName", () => {
   expect(formatCharacterStyleName("四国めたん", DEFAULT_STYLE_NAME)).toEqual(
-    "四国めたん（ノーマル）"
+    "四国めたん（ノーマル）",
   );
 });
 
 test("sanitizeFileName", () => {
   expect(sanitizeFileName("テスト\x00ファイル\x1f名.txt")).toBe(
-    "テストファイル名.txt"
+    "テストファイル名.txt",
   );
   expect(sanitizeFileName('テスト"*/:<>?\\|ファイル名.txt')).toBe(
-    "テストファイル名.txt"
+    "テストファイル名.txt",
   );
 });
 
@@ -117,10 +122,10 @@ describe.each([
         enableRubyNotation: false,
       };
       expect(extractExportText(text, param)).toBe(
-        expectedSkippedMemoText + rubyText
+        expectedSkippedMemoText + rubyText,
       );
       expect(extractYomiText(text, param)).toBe(
-        expectedSkippedMemoText + rubyText
+        expectedSkippedMemoText + rubyText,
       );
     });
 
@@ -130,10 +135,10 @@ describe.each([
         enableRubyNotation: true,
       };
       expect(extractExportText(text, param)).toBe(
-        memoText + expectedSkippedRubyYomiText
+        memoText + expectedSkippedRubyYomiText,
       );
       expect(extractYomiText(text, param)).toBe(
-        memoText + expectedSkippedRubyExportText
+        memoText + expectedSkippedRubyExportText,
       );
     });
 
@@ -143,13 +148,13 @@ describe.each([
         enableRubyNotation: true,
       };
       expect(extractExportText(text, param)).toBe(
-        expectedSkippedMemoText + expectedSkippedRubyYomiText
+        expectedSkippedMemoText + expectedSkippedRubyYomiText,
       );
       expect(extractYomiText(text, param)).toBe(
-        expectedSkippedMemoText + expectedSkippedRubyExportText
+        expectedSkippedMemoText + expectedSkippedRubyExportText,
       );
     });
-  }
+  },
 );
 
 describe("TuningTranscription", () => {
@@ -181,7 +186,7 @@ describe("TuningTranscription", () => {
     // 転写されていない
     ["あ", "う", "お", "た", "ち", "つ", "て", "と"].forEach((moraText) => {
       expect(findMora(result, moraText)).not.toEqual(
-        findMora(before, moraText)
+        findMora(before, moraText),
       );
     });
   });
@@ -210,7 +215,7 @@ describe("TuningTranscription", () => {
     // 転写されていない
     ["あ", "しゃ", "き", "きゅ"].forEach((moraText) => {
       expect(findMora(result, moraText)).not.toEqual(
-        findMora(before, moraText)
+        findMora(before, moraText),
       );
     });
   });
@@ -246,17 +251,18 @@ describe("isAccentPhrasesTextDifferent", () => {
 
 test("buildAudioFileNameFromRawData", () => {
   const fileNamePattern =
-    "index=$連番$ characterName=$キャラ$ text=$テキスト$ styleName=$スタイル$ date=$日付$";
+    "index=$連番$ characterName=$キャラ$ text=$テキスト$ styleName=$スタイル$ date=$日付$ projectName=$プロジェクト名$";
   const vars = {
     index: 10,
     characterName: "キャラ１",
     text: "テストテキスト",
     styleName: "スタイル１",
     date: "20210801",
+    projectName: "サンプルプロジェクト",
   };
   const result = buildAudioFileNameFromRawData(fileNamePattern, vars);
   expect(result).toBe(
-    "index=011 characterName=キャラ１ text=テストテキスト styleName=スタイル１ date=20210801"
+    "index=011 characterName=キャラ１ text=テストテキスト styleName=スタイル１ date=20210801 projectName=サンプルプロジェクト",
   );
 });
 
@@ -264,58 +270,94 @@ test("getToolbarButtonName", () => {
   expect(getToolbarButtonName("PLAY_CONTINUOUSLY")).toBe("連続再生");
   expect(getToolbarButtonName("STOP")).toBe("停止");
   expect(getToolbarButtonName("EXPORT_AUDIO_SELECTED")).toBe(
-    "選択音声を書き出し"
+    "選択音声を書き出し",
   );
   expect(getToolbarButtonName("EXPORT_AUDIO_ALL")).toBe("全部書き出し");
   expect(getToolbarButtonName("EXPORT_AUDIO_CONNECT_ALL")).toBe(
-    "音声を繋げて書き出し"
+    "音声を繋げて書き出し",
   );
   expect(getToolbarButtonName("存在しないタグ" as ToolbarButtonTagType)).toBe(
-    undefined
+    undefined,
   );
-});
-
-describe("createKanaRegex", () => {
-  it("includeSeparationがtrueの場合、読点とクエスチョンも含む", () => {
-    const regex = createKanaRegex(true);
-    expect(regex.test("あいうえお、")).toBe(true);
-    expect(regex.test("かきくけこ？")).toBe(true);
-  });
-
-  it("includeSeparationがfalseの場合、読点とクエスチョンを含まない", () => {
-    const regex = createKanaRegex(false);
-    expect(regex.test("あいうえお、")).toBe(false);
-    expect(regex.test("かきくけこ？")).toBe(false);
-  });
-});
-
-test("convertHiraToKana", () => {
-  expect(convertHiraToKana("あいうえお")).toBe("アイウエオ");
-  expect(convertHiraToKana("がぱをんー")).toBe("ガパヲンー");
-});
-
-test("convertLongVowel", () => {
-  expect(convertLongVowel("アー")).toBe("アア");
-  expect(convertLongVowel("ガー")).toBe("ガア");
-  expect(convertLongVowel("ンー")).toBe("ンン");
-});
-
-test("getBaseName", () => {
-  expect(getBaseName("/path/to/file.txt")).toBe("file.txt");
-  expect(getBaseName("/path/to/file")).toBe("file");
-  expect(getBaseName("file.txt")).toBe("file.txt");
-  expect(getBaseName("file")).toBe("file");
 });
 
 test("isOnCommandOrCtrlKeyDown", () => {
   expect(isOnCommandOrCtrlKeyDown({ metaKey: true, ctrlKey: false })).toBe(
-    isMac
+    isMac,
   );
   expect(isOnCommandOrCtrlKeyDown({ metaKey: false, ctrlKey: true })).toBe(
-    !isMac
+    !isMac,
   );
   expect(isOnCommandOrCtrlKeyDown({ metaKey: true, ctrlKey: true })).toBe(true);
   expect(isOnCommandOrCtrlKeyDown({ metaKey: false, ctrlKey: false })).toBe(
-    false
+    false,
   );
+});
+
+describe("filterCharacterInfosByStyleType", () => {
+  const createCharacterInfo = (
+    styleTypes: (undefined | "talk" | "frame_decode" | "sing")[],
+  ): CharacterInfo => {
+    const engineId = EngineId(uuid4());
+    return {
+      portraitPath: "path/to/portrait",
+      metas: {
+        policy: "policy",
+        speakerName: "speakerName",
+        speakerUuid: SpeakerId(uuid4()),
+        styles: styleTypes.map((styleType) => ({
+          styleType,
+          styleName: "styleName",
+          engineId,
+          styleId: StyleId(Math.random()),
+          iconPath: "path/to/icon",
+          portraitPath: "path/to/portrait",
+          voiceSamplePaths: [],
+        })),
+      },
+    };
+  };
+  const characterInfos: CharacterInfo[] = [
+    createCharacterInfo(["talk"]),
+    createCharacterInfo(["frame_decode"]),
+    createCharacterInfo(["sing"]),
+    createCharacterInfo(["talk", "frame_decode", "sing"]),
+    createCharacterInfo([undefined]),
+  ];
+
+  for (const styleType of ["frame_decode", "sing"] as const) {
+    test(`${styleType}のキャラクターが取得できる`, () => {
+      const filtered = filterCharacterInfosByStyleType(
+        characterInfos,
+        styleType,
+      );
+      // talkしかないキャラクターは除外される
+      expect(filtered.length).toBe(2);
+      filtered.forEach((c) => {
+        // styleTypeが指定したものになっている
+        expect(c.metas.styles[0].styleType).toBe(styleType);
+        // stylesの数が正しい
+        expect(c.metas.styles.length).toBe(1);
+      });
+    });
+  }
+
+  test(`singerLikeを指定するとsingとhummingのキャラクターが取得できる`, () => {
+    const filtered = filterCharacterInfosByStyleType(
+      characterInfos,
+      "singerLike",
+    );
+    expect(filtered.length).toBe(3);
+    expect(filtered[0].metas.styles.length).toBe(1);
+    expect(filtered[1].metas.styles.length).toBe(1);
+    expect(filtered[2].metas.styles.length).toBe(2);
+  });
+
+  test(`talkを指定するとsingerLike以外のキャラクターが取得できる`, () => {
+    const filtered = filterCharacterInfosByStyleType(characterInfos, "talk");
+    expect(filtered.length).toBe(3);
+    expect(filtered[0].metas.styles.length).toBe(1);
+    expect(filtered[1].metas.styles.length).toBe(1);
+    expect(filtered[2].metas.styles.length).toBe(1);
+  });
 });
